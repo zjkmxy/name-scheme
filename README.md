@@ -1,4 +1,7 @@
 # How we name things
+This document is a collection of Name schema and APIs proposed in NDN application papers.
+We want to extract the common structure and design a unified framework
+supporting all these things in the next version of python-ndn.
 
 ## Distributed Dataset Synchronization in Disruptive Networks
 ```text
@@ -11,6 +14,23 @@ API:
 ```text
 produce(data)
 onData(data)
+```
+
+Code:
+```C++
+  void OnData(const std::string& content, const VersionVector& vv) {
+    std::cout << "Upcall OnData: content=\"" << content << '"' << ", version vector=" << ToString(vv)
+              << std::endl;
+  }
+
+  void PublishData() {
+    node_.PublishData("Hello from " + node_.GetNodeID());
+    scheduler_.scheduleEvent(time::milliseconds(rdist_(rengine_)),
+                             [this] { PublishData(); });
+  }
+
+  node_(face_, scheduler_, key_chain_, nid, prefix, vid, 
+        std::bind(&SimpleNode::OnData, this, _1, _2);
 ```
 
 ## Lessons Learned Building a Secure Network Measurement Framework using Basic NDN
@@ -189,6 +209,8 @@ CK Data Name = CK Name + /ENCRYPTED-BY + KEK Name
 Data Name := /<producer prefix> + Other Components  (CK Name is hidden in the Content, not in the Name)
 ```
 
+![NAC](nac.png)
+
 ## Schematizing Trust in Named Data Networking
 
 Name patterns:
@@ -211,6 +233,102 @@ admin  (<>*)<blog><admin>[user]<KEY>[id]  admin(\1) | root(\1)  /a/blog/admin/Al
 
 ANCHOR
 root  (<>*)<blog><KEY>[id]  /a/blog/KEY/1
+```
+
+Code for consumer:
+```C++
+class Consumer : noncopyable
+{
+public:
+  Consumer()
+    : m_face(nullptr, m_keyChain)
+    , m_validator(m_face)
+    , m_decryptor(m_keyChain.getPib().getDefaultIdentity().getDefaultKey(), m_validator, m_keyChain, m_face)
+  {
+    m_validator.load(R"CONF(
+        trust-anchor
+        {
+          type any
+        }
+      )CONF", "fake-config");
+  }
+private:
+  void onData(const Interest& interest, const Data& data) {
+    m_validator.validate(data,
+      [=] (const Data& data) {
+        m_decryptor.decrypt(data.getContent().blockFromValue(),
+          [=] (ConstBufferPtr content) {
+            std::cout << "Decrypted content: "
+                      << std::string(reinterpret_cast<const char*>(content->data()), content->size())
+                      << std::endl;
+          },
+          [=] (const ErrorCode&, const std::string& error) {
+            std::cerr << "Cannot decrypt data: " << error << std::endl;
+          });
+      },
+      [=] (const Data& data, const ValidationError& error) {
+        std::cerr << "Cannot validate retrieved data: " << error << std::endl;
+      });
+  }
+};
+```
+
+Code for producer:
+```C++
+class Producer : noncopyable
+{
+public:
+  Producer()
+    : m_face(nullptr, m_keyChain)
+    , m_validator(m_face)
+    , m_accessManager(m_keyChain.createIdentity("/nac/example", RsaKeyParams()), "test",
+                      m_keyChain, m_face)
+    , m_encryptor("/nac/example/NAC/test",
+                  "/nac/example/CK", signingWithSha256(),
+                  [] (auto...) {
+                    std::cerr << "Failed to publish CK";
+                  }, m_validator, m_keyChain, m_face)\
+  {
+    m_validator.load(R"CONF(
+        trust-anchor
+        {
+          type any
+        }
+      )CONF", "fake-config");
+  }
+
+  void run() {
+    // give access to default identity. If consumer uses the same default identity, he will be able to decrypt
+    m_accessManager.addMember(m_keyChain.getPib().getDefaultIdentity().getDefaultKey().getDefaultCertificate());
+    //...
+  }
+
+private:
+  void onInterest(const InterestFilter& filter, const Interest& interest) {
+    Name dataName(interest.getName());
+    dataName
+      .append("testApp") // add "testApp" component to Interest name
+      .appendVersion();  // add "version" component (current UNIX timestamp in milliseconds)
+    static const std::string content = "HELLO KITTY";
+
+    // Create Data packet
+    shared_ptr<Data> data = make_shared<Data>();
+    data->setName(dataName);
+    data->setFreshnessPeriod(10_s); // 10 seconds
+
+    auto blob = m_encryptor.encrypt(reinterpret_cast<const uint8_t*>(content.data()), content.size());
+    data->setContent(blob.wireEncode());
+
+    // Sign Data packet with default identity
+    m_keyChain.sign(*data);
+    // m_keyChain.sign(data, <identityName>);
+    // m_keyChain.sign(data, <certificate>);
+
+    // Return Data packet to the requester
+    std::cout << ">> D: " << *data << std::endl;
+    m_face.put(*data);
+  }
+};
 ```
 
 ## Scalable Name-based Data Synchronization for Named Data Networking
@@ -240,6 +358,11 @@ Trust Schema Example:
 ```text
 StudentRule  (<>*)<AR><video><><>  [@1]<ABS><><42=pp>[@{satisfy(“student”)}]
 ```
+
+Code:
+There is a python library without examples.
+
+![NDN-ABS](ndn-abs.png)
 
 ## Decentralized and Secure Multimedia Sharing Application over Named Data Networking
 
@@ -301,7 +424,7 @@ Content
 </Content>
 ```
 
-API:
+Code:
 Current [ndn-tools](https://github.com/named-data/ndn-tools/tree/master/tools/chunks/catchunks) has
 some pipelining algorithms.
 
@@ -326,6 +449,3 @@ Can we design a better one?
 - Storage => Local Repo (PacketStorage (auto), CustomStorage)
 - Triggers => Sync, Pub/Sub
 - Other High level API?
-
-# Our system
-TBD
